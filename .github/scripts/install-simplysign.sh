@@ -4,7 +4,7 @@
 
 set -e
 
-INSTALLER_URL="https://files.certum.eu/software/SimplySignDesktop/Windows/9.3.4.72/SimplySignDesktop-9.3.4.72-64-bit-en.msi"
+INSTALLER_URL="https://www.files.certum.eu/software/SimplySignDesktop/Windows/9.4.0.84/SimplySignDesktop-9.4.0.84-64-bit-en.msi"
 MSI_FILE="SimplySignDesktop.msi"
 INSTALL_DIR="C:\\Program Files\\Certum\\SimplySign Desktop"
 
