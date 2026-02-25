@@ -12,7 +12,7 @@ echo "=== Installing SimplySign Desktop ==="
 
 # Download installer
 echo "Downloading SimplySign Desktop..."
-curl -L -o "$MSI_FILE" --connect-timeout 30 --max-time 60 "$INSTALLER_URL"
+curl -L -o "$MSI_FILE" --connect-timeout 30 --max-time 300 "$INSTALLER_URL"
 
 if [ ! -f "$MSI_FILE" ]; then
     echo "ERROR: Failed to download installer"
