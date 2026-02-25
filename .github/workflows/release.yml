@@ -69,6 +69,31 @@ jobs:
           go build -ldflags "${LDFLAGS}" -o "i2p-vanitygen-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" .
         shell: bash
 
+      - name: Install SimplySign Desktop
+        if: matrix.goos == 'windows'
+        run: |
+          chmod +x ./.github/scripts/install-simplysign.sh
+          ./.github/scripts/install-simplysign.sh
+        shell: bash
+
+      - name: Configure SimplySign registry
+        if: matrix.goos == 'windows'
+        run: powershell -ExecutionPolicy Bypass -File .github/scripts/configure-simplysign-registry.ps1
+
+      - name: Authenticate SimplySign
+        if: matrix.goos == 'windows'
+        env:
+          CERTUM_OTP_URI: ${{ secrets.CERTUM_OTP_URI }}
+          CERTUM_USERNAME: ${{ secrets.CERTUM_USERNAME }}
+        run: powershell -ExecutionPolicy Bypass -File .github/scripts/connect-simplysign.ps1
+
+      - name: Sign Windows binary
+        if: matrix.goos == 'windows'
+        env:
+          CERTUM_CERTIFICATE_SHA1: ${{ secrets.CERTUM_CERTIFICATE_SHA1 }}
+        run: |
+          powershell -ExecutionPolicy Bypass -File ".github/scripts/sign-exe.ps1" -BinaryPath "i2p-vanitygen-windows-amd64.exe"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
