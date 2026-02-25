@@ -73,7 +73,7 @@ Write-Host $verifyOutput
 
 if ($verifyExit -ne 0) {
     Write-Host "WARNING: Signature verification failed (exit code $verifyExit)"
-    Write-Host "The binary may still be signed — verification can fail in CI without full cert chain"
+    Write-Host "The binary may still be signed - verification can fail in CI without full cert chain"
 } else {
     Write-Host "SUCCESS: Signature verified"
 }
