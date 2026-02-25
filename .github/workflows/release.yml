@@ -13,11 +13,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: windows-latest
-            goos: windows
-            goarch: amd64
-            ext: .exe
-            cgo: 0
           - os: ubuntu-latest
             goos: linux
             goarch: amd64
@@ -49,13 +44,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc pkg-config libwayland-dev libx11-dev libx11-xcb-dev libxkbcommon-x11-dev libgles2-mesa-dev libegl1-mesa-dev libffi-dev libxcursor-dev libvulkan-dev
 
-      - name: Generate Windows resources
-        if: matrix.goos == 'windows'
-        run: |
-          go install github.com/tc-hib/go-winres@latest
-          go-winres make
-        shell: bash
-
       - name: Build
         env:
           GOOS: ${{ matrix.goos }}
@@ -63,44 +51,8 @@ jobs:
           CGO_ENABLED: ${{ matrix.cgo }}
         run: |
           LDFLAGS="-s -w -X github.com/go-i2p/i2p-vanitygen/internal/version.Version=${{ github.ref_name }}"
-          if [ "${{ matrix.goos }}" = "windows" ]; then
-            LDFLAGS="-H=windowsgui ${LDFLAGS}"
-          fi
           go build -ldflags "${LDFLAGS}" -o "i2p-vanitygen-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" .
         shell: bash
-
-      - name: Install SimplySign Desktop
-        if: matrix.goos == 'windows'
-        run: |
-          chmod +x ./.github/scripts/install-simplysign.sh
-          ./.github/scripts/install-simplysign.sh
-        shell: bash
-
-      - name: Configure SimplySign registry
-        if: matrix.goos == 'windows'
-        run: powershell -ExecutionPolicy Bypass -File .github/scripts/configure-simplysign-registry.ps1
-
-      - name: Authenticate SimplySign
-        if: matrix.goos == 'windows'
-        env:
-          CERTUM_OTP_URI: ${{ secrets.CERTUM_OTP_URI }}
-          CERTUM_USERNAME: ${{ secrets.CERTUM_USERNAME }}
-        run: powershell -ExecutionPolicy Bypass -File .github/scripts/connect-simplysign.ps1
-
-      - name: Sign Windows binary
-        if: matrix.goos == 'windows'
-        env:
-          CERTUM_CERTIFICATE_SHA1: ${{ secrets.CERTUM_CERTIFICATE_SHA1 }}
-        run: |
-          powershell -ExecutionPolicy Bypass -File ".github/scripts/sign-exe.ps1" -BinaryPath "i2p-vanitygen-windows-amd64.exe"
-
-      - name: Upload debug screenshot
-        if: matrix.goos == 'windows' && always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: simplysign-debug
-          path: simplysign-screenshot.png
-          if-no-files-found: ignore
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -108,8 +60,40 @@ jobs:
           name: i2p-vanitygen-${{ matrix.goos }}-${{ matrix.goarch }}
           path: i2p-vanitygen-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
 
+  build-windows:
+    runs-on: [self-hosted, Windows, X64]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate Windows resources
+        run: |
+          go install github.com/tc-hib/go-winres@latest
+          go-winres make
+        shell: cmd
+
+      - name: Build
+        run: |
+          set GOOS=windows
+          set GOARCH=amd64
+          set CGO_ENABLED=0
+          go build -ldflags "-H=windowsgui -s -w -X github.com/go-i2p/i2p-vanitygen/internal/version.Version=${{ github.ref_name }}" -o "i2p-vanitygen-windows-amd64.exe" .
+        shell: cmd
+
+      - name: Sign Windows binary
+        env:
+          CERTUM_CERTIFICATE_SHA1: ${{ secrets.CERTUM_CERTIFICATE_SHA1 }}
+        run: powershell -ExecutionPolicy Bypass -File ".github/scripts/sign-exe.ps1" -BinaryPath "i2p-vanitygen-windows-amd64.exe"
+        shell: cmd
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: i2p-vanitygen-windows-amd64
+          path: i2p-vanitygen-windows-amd64.exe
+
   release:
-    needs: build
+    needs: [build, build-windows]
     runs-on: ubuntu-latest
 
     steps:
