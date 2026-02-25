@@ -88,6 +88,12 @@ func Run(w *app.Window) error {
 		telemetryOptedIn: cfg.TelemetryOptedIn,
 	}
 
+	// Set the window icon (Windows title bar)
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		setWindowIcon("I2P Vanity Address Generator")
+	}()
+
 	// Background update check
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
