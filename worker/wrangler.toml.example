@@ -1,0 +1,8 @@
+name = "i2p-vanitygen-telemetry"
+main = "telemetry-worker.js"
+compatibility_date = "2024-01-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "i2p-vanitygen-telemetry"
+database_id = "<your-database-id>"
