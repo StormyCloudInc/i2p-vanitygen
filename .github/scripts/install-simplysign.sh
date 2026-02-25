@@ -4,8 +4,8 @@
 
 set -e
 
-INSTALLER_URL="https://simplysign-dist.certum.eu/SSD/SimplySignDesktopSetup_x64.msi"
-MSI_FILE="SimplySignDesktopSetup_x64.msi"
+INSTALLER_URL="https://files.certum.eu/software/SimplySignDesktop/Windows/9.3.4.72/SimplySignDesktop-9.3.4.72-64-bit-en.msi"
+MSI_FILE="SimplySignDesktop.msi"
 INSTALL_DIR="C:\\Program Files\\Certum\\SimplySign Desktop"
 
 echo "=== Installing SimplySign Desktop ==="
@@ -23,7 +23,8 @@ echo "Downloaded: $(wc -c < "$MSI_FILE") bytes"
 
 # Install silently
 echo "Installing SimplySign Desktop..."
-powershell -Command "Start-Process msiexec -ArgumentList '/i','$MSI_FILE','/quiet','/norestart','ALLUSERS=1','/l*v','install.log' -Wait -NoNewWindow" &
+MSI_WIN_PATH=$(cygpath -w "$(pwd)/$MSI_FILE")
+powershell -Command "Start-Process msiexec -ArgumentList '/i','\"$MSI_WIN_PATH\"','/quiet','/norestart','ALLUSERS=1','/l*v','install.log' -Wait -NoNewWindow" &
 INSTALL_PID=$!
 
 # Monitor installation (up to 3 minutes)
