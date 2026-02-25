@@ -105,8 +105,29 @@ public static class Totp
 }
 "@
 
-$otp = [Totp]::Now($Base32, $Digits, $Period, $Algorithm)
-Write-Host "Generated TOTP ($Algorithm): $otp"
+function Get-TotpRemainingSeconds {
+    param([int]$TotpPeriod)
+    $epoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    return ($TotpPeriod - ($epoch % $TotpPeriod))
+}
+
+function New-ReadyTotp {
+    param([int]$MinRemainingSeconds = 8)
+
+    $remaining = Get-TotpRemainingSeconds -TotpPeriod $Period
+    if ($remaining -lt $MinRemainingSeconds) {
+        $sleepFor = $remaining + 1
+        Write-Host "TOTP window too close to expiry (${remaining}s left), waiting ${sleepFor}s for next period..."
+        Start-Sleep -Seconds $sleepFor
+    }
+
+    $code = [Totp]::Now($Base32, $Digits, $Period, $Algorithm)
+    $remaining = Get-TotpRemainingSeconds -TotpPeriod $Period
+    return @{
+        Code = $code
+        Remaining = $remaining
+    }
+}
 
 # === Launch SimplySign Desktop ===
 Write-Host "Launching SimplySign Desktop..."
@@ -192,12 +213,9 @@ if ($updateDialog -and $noButton) {
     Write-Host "  No update dialog found"
 }
 
-# === Step 2: Re-generate TOTP right before filling fields ===
-$otp = [Totp]::Now($Base32, $Digits, $Period, $Algorithm)
-$epoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-$remaining = $Period - ($epoch % $Period)
+# === Step 2: Defer TOTP generation until right before token field submission ===
 Write-Host ""
-Write-Host "Fresh TOTP ($Algorithm): $otp (valid for ${remaining}s)"
+Write-Host "Will generate TOTP immediately before token entry..."
 
 # === Step 3: Find login form fields (WinForms controls show as Pane, not Edit) ===
 Write-Host ""
@@ -272,6 +290,9 @@ if ($idField -and $tokenField) {
     }
 
     Write-Host "Setting Token..."
+    $otpData = New-ReadyTotp -MinRemainingSeconds 8
+    $otp = $otpData.Code
+    Write-Host "Fresh TOTP ($Algorithm): $otp (valid for $($otpData.Remaining)s)"
     try {
         $tokenField.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue($otp)
         Write-Host "  Set via ValuePattern"
@@ -281,8 +302,6 @@ if ($idField -and $tokenField) {
         Start-Sleep -Milliseconds 300
         [System.Windows.Forms.SendKeys]::SendWait($otp)
     }
-
-    Start-Sleep -Milliseconds 300
 
     Write-Host "Clicking Ok..."
     if ($okButton) {
