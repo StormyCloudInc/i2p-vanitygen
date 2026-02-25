@@ -143,13 +143,115 @@ Start-Sleep -Milliseconds 200
 $wshell.SendKeys("{ENTER}")
 
 Write-Host "Credentials sent, waiting for authentication..."
-Start-Sleep -Seconds 8
+Start-Sleep -Seconds 10
+
+# === Post-authentication diagnostics ===
+Write-Host ""
+Write-Host "=== Post-Auth Diagnostics ==="
+
+# List all visible windows
+Write-Host ""
+Write-Host "Visible windows:"
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Collections.Generic;
+
+public class WinEnum {
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+    [DllImport("user32.dll")] static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+    public static List<string> Windows = new List<string>();
+
+    public static void Enumerate() {
+        Windows.Clear();
+        EnumWindows((hWnd, lParam) => {
+            if (IsWindowVisible(hWnd)) {
+                StringBuilder sb = new StringBuilder(256);
+                GetWindowText(hWnd, sb, 256);
+                string title = sb.ToString();
+                if (!string.IsNullOrWhiteSpace(title)) {
+                    uint pid;
+                    GetWindowThreadProcessId(hWnd, out pid);
+                    Windows.Add(string.Format("[PID {0}] {1}", pid, title));
+                }
+            }
+            return true;
+        }, IntPtr.Zero);
+    }
+}
+"@
+[WinEnum]::Enumerate()
+foreach ($w in [WinEnum]::Windows) {
+    Write-Host "  $w"
+}
+
+# Take a screenshot for debugging
+Write-Host ""
+Write-Host "Capturing screenshot..."
+try {
+    Add-Type -AssemblyName System.Windows.Forms
+    $screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+    $bitmap = New-Object System.Drawing.Bitmap($screen.Width, $screen.Height)
+    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+    $graphics.CopyFromScreen($screen.Location, [System.Drawing.Point]::Empty, $screen.Size)
+    $screenshotPath = "$env:GITHUB_WORKSPACE\simplysign-screenshot.png"
+    $bitmap.Save($screenshotPath)
+    $graphics.Dispose()
+    $bitmap.Dispose()
+    Write-Host "Screenshot saved to: $screenshotPath"
+} catch {
+    Write-Host "Screenshot failed: $_"
+}
+
+# Check certificate stores
+Write-Host ""
+Write-Host "Checking certificate stores..."
+foreach ($storeName in @("My", "SmartCardRoot", "Root")) {
+    foreach ($location in @("CurrentUser", "LocalMachine")) {
+        try {
+            $store = New-Object System.Security.Cryptography.X509Certificates.X509Store($storeName, $location)
+            $store.Open("ReadOnly")
+            $certs = $store.Certificates
+            if ($certs.Count -gt 0) {
+                Write-Host "  ${location}\${storeName}: $($certs.Count) cert(s)"
+                foreach ($cert in $certs) {
+                    Write-Host "    $($cert.Thumbprint) | $($cert.Subject)"
+                }
+            }
+            $store.Close()
+        } catch {}
+    }
+}
+
+# Check smart card subsystem
+Write-Host ""
+Write-Host "Smart card info (certutil -scinfo):"
+$scinfo = certutil -scinfo 2>&1
+Write-Host ($scinfo | Out-String)
+
+# Check CSP providers
+Write-Host ""
+Write-Host "Registered CSP providers:"
+$cspOutput = certutil -csplist 2>&1
+foreach ($line in $cspOutput) {
+    if ($line -match "SimplySign|SmartSign|Certum|proCertum") {
+        Write-Host "  >>> $line"
+    } elseif ($line -match "Provider Name:") {
+        Write-Host "  $line"
+    }
+}
 
 # Verify process is still running
+Write-Host ""
 if (Get-Process -Id $proc.Id -ErrorAction SilentlyContinue) {
-    Write-Host "SUCCESS: SimplySign Desktop is running and authenticated"
+    Write-Host "SimplySign Desktop is running (PID: $($proc.Id))"
 } else {
-    Write-Host "WARNING: SimplySign Desktop process exited (may indicate auth failure)"
+    Write-Host "WARNING: SimplySign Desktop process exited"
 }
 
 Write-Host "=== Authentication complete ==="

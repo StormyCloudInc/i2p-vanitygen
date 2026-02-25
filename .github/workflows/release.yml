@@ -94,6 +94,14 @@ jobs:
         run: |
           powershell -ExecutionPolicy Bypass -File ".github/scripts/sign-exe.ps1" -BinaryPath "i2p-vanitygen-windows-amd64.exe"
 
+      - name: Upload debug screenshot
+        if: matrix.goos == 'windows' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: simplysign-debug
+          path: simplysign-screenshot.png
+          if-no-files-found: ignore
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
