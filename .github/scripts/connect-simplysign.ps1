@@ -133,13 +133,27 @@ if (-not $focused) {
 Write-Host "Window focused"
 Start-Sleep -Milliseconds 400
 
+# Diagnostic: log username info (without revealing full value)
+Write-Host "Username length: $($UserId.Length), starts with: $($UserId.Substring(0, [Math]::Min(3, $UserId.Length)))..."
+
+# Re-generate TOTP right before sending to minimize expiry risk
+$otp = [Totp]::Now($Base32, $Digits, $Period, $Algorithm)
+$epoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+$remaining = $Period - ($epoch % $Period)
+Write-Host "Fresh TOTP ($Algorithm): $otp (valid for ${remaining}s)"
+
 # Inject credentials: username TAB otp ENTER
-$wshell.SendKeys($UserId)
-Start-Sleep -Milliseconds 200
+# Use clipboard for username to avoid SendKeys issues with special chars like @
+Add-Type -AssemblyName System.Windows.Forms
+[System.Windows.Forms.Clipboard]::SetText($UserId)
+$wshell.SendKeys("^a")
+Start-Sleep -Milliseconds 100
+$wshell.SendKeys("^v")
+Start-Sleep -Milliseconds 300
 $wshell.SendKeys("{TAB}")
-Start-Sleep -Milliseconds 200
+Start-Sleep -Milliseconds 300
 $wshell.SendKeys($otp)
-Start-Sleep -Milliseconds 200
+Start-Sleep -Milliseconds 300
 $wshell.SendKeys("{ENTER}")
 
 Write-Host "Credentials sent, waiting for authentication..."
