@@ -31,3 +31,38 @@ jobs:
         with:
           name: i2p-vanitygen-darwin-arm64-gpu-test
           path: i2p-vanitygen-darwin-arm64
+
+  build-windows-gpu:
+    runs-on: [self-hosted, Windows, X64]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate OpenCL import library
+        run: |
+          $gccDir = Split-Path (Get-Command gcc).Source
+          $libDir = Join-Path (Split-Path $gccDir) "lib"
+          gendef C:\Windows\System32\OpenCL.dll
+          dlltool -d OpenCL.def -l libOpenCL.a
+          Copy-Item libOpenCL.a $libDir
+          Write-Host "Installed libOpenCL.a to $libDir"
+        shell: powershell
+
+      - name: Build Windows amd64 with GPU support
+        run: |
+          go version
+          echo Building with OpenCL GPU support...
+          set GOOS=windows
+          set GOARCH=amd64
+          set CGO_ENABLED=1
+          set CC=gcc
+          go build -ldflags "-H=windowsgui -s -w -X github.com/go-i2p/i2p-vanitygen/internal/version.Version=gpu-test" -o "i2p-vanitygen-windows-amd64.exe" .
+          echo Build successful!
+          dir i2p-vanitygen-windows-amd64.exe
+        shell: cmd
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: i2p-vanitygen-windows-amd64-gpu-test
+          path: i2p-vanitygen-windows-amd64.exe
