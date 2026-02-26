@@ -818,8 +818,8 @@ func layoutInputCard(gtx layout.Context, th *material.Theme, s *state, prefixEdi
 				fg := color.NRGBA{R: 0x00, G: 0x00, B: 0x00, A: 0xff}
 				if s.running {
 					label = "Stop"
-					bg = color.NRGBA{R: 0x40, G: 0x40, B: 0x40, A: 0xff}
-					fg = colorTextBody
+					bg = color.NRGBA{R: 0xdc, G: 0x26, B: 0x26, A: 0xff} // red
+					fg = color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff}
 				}
 				btn := material.Button(th, startBtn, label)
 				btn.Background = bg
@@ -869,7 +869,7 @@ func segmentBtn(gtx layout.Context, th *material.Theme, btn *widget.Clickable, l
 		}),
 		layout.Stacked(func(gtx layout.Context) layout.Dimensions {
 			return material.Clickable(gtx, btn, func(gtx layout.Context) layout.Dimensions {
-				return layout.Inset{Top: unit.Dp(14), Bottom: unit.Dp(14)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return layout.Inset{Top: unit.Dp(18), Bottom: unit.Dp(18)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 					return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 						lbl := material.Body2(th, label)
 						lbl.Color = fg
