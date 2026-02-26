@@ -358,15 +358,10 @@ func Run(w *app.Window) error {
 }
 
 func layoutApp(gtx layout.Context, th *material.Theme, s *state, prefixEditor *widget.Editor, startBtn, saveBtn *widget.Clickable, coreSlider *widget.Float, maxCores int, gpuToggle *widget.Bool, netI2PBtn, netTorBtn *widget.Clickable, updateBannerBtn, updateDismissBtn *widget.Clickable, scrollList *widget.List) layout.Dimensions {
-	// Center content horizontally, pin to top, cap width at 460dp
-	return layout.N.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		maxW := gtx.Dp(460)
-		if gtx.Constraints.Max.X > maxW {
-			gtx.Constraints.Max.X = maxW
-			gtx.Constraints.Min.X = maxW
-		}
-
-		return layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(4), Left: unit.Dp(30), Right: unit.Dp(30)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+	// Fill window width with side padding
+	gtx.Constraints.Min.X = gtx.Constraints.Max.X
+	return layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(4), Left: unit.Dp(20), Right: unit.Dp(20)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		return layout.N.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 			// Sections: 0=header, 1=spacer, 2=update banner, 3=input card, 4=spacer, 5=results card, 6=bottom spacer
 			const numSections = 7
 
