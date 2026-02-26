@@ -189,6 +189,34 @@ jobs:
           sha256sum * > checksums.txt
           cat checksums.txt
 
+      - name: VirusTotal Scan
+        id: virustotal
+        uses: crazy-max/ghaction-virustotal@v4
+        with:
+          vt_api_key: ${{ secrets.VT_API_KEY }}
+          request_rate: 4
+          files: |
+            artifacts/i2p-vanitygen-windows-amd64.exe
+            artifacts/i2p-vanitygen-linux-amd64
+            artifacts/i2p-vanitygen-darwin-arm64
+            artifacts/i2p-vanitygen-darwin-amd64
+
+      - name: Parse VirusTotal results
+        id: vt_links
+        run: |
+          ANALYSIS="${{ steps.virustotal.outputs.analysis }}"
+          BODY=""
+          IFS=',' read -ra ENTRIES <<< "$ANALYSIS"
+          for entry in "${ENTRIES[@]}"; do
+            FILE=$(echo "$entry" | cut -d'=' -f1 | xargs basename)
+            URL=$(echo "$entry" | cut -d'=' -f2-)
+            BODY="${BODY}- [\`${FILE}\`](${URL})"$'\n'
+          done
+          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+          echo "links<<$EOF" >> $GITHUB_OUTPUT
+          echo "$BODY" >> $GITHUB_OUTPUT
+          echo "$EOF" >> $GITHUB_OUTPUT
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
@@ -207,6 +235,10 @@ jobs:
             | macOS | arm64 (Apple Silicon) | `i2p-vanitygen-darwin-arm64` | Notarized |
             | macOS | amd64 (Intel) | `i2p-vanitygen-darwin-amd64` | Notarized |
             | Linux | amd64 | `i2p-vanitygen-linux-amd64` | PKCS#7 (`.p7s`) |
+
+            ### VirusTotal Analysis
+
+            ${{ steps.vt_links.outputs.links }}
 
             ### Verify
 
