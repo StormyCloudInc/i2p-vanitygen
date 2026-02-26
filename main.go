@@ -15,7 +15,7 @@ func main() {
 	go func() {
 		w := new(app.Window)
 		w.Option(app.Title("I2P Vanity Address Generator"))
-		w.Option(app.Size(520, 820))
+		w.Option(app.Size(520, 680))
 		if err := ui.Run(w); err != nil {
 			os.Exit(1)
 		}

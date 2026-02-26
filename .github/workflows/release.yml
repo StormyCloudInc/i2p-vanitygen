@@ -124,8 +124,39 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          sha256sum * > checksums.txt
+          cat checksums.txt
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           files: artifacts/*
           generate_release_notes: true
+          body: |
+            ## I2P Vanitygen ${{ github.ref_name }}
+
+            Generate vanity I2P addresses with a custom prefix.
+
+            ### Downloads
+
+            | Platform | Architecture | File | Signed |
+            |----------|-------------|------|--------|
+            | Windows | amd64 | `i2p-vanitygen-windows-amd64.exe` | Authenticode |
+            | Linux | amd64 | `i2p-vanitygen-linux-amd64` | PKCS#7 (`.p7s`) |
+
+            ### Verify
+
+            **Windows** — signature is embedded (right-click → Properties → Digital Signatures)
+
+            **Linux** — verify the detached PKCS#7 signature:
+            ```
+            openssl cms -verify -in i2p-vanitygen-linux-amd64.p7s -content i2p-vanitygen-linux-amd64 -inform DER -noverify
+            ```
+
+            **Checksums:**
+            ```
+            sha256sum -c checksums.txt --ignore-missing
+            ```
