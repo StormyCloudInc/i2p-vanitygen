@@ -43,6 +43,7 @@ type state struct {
 	status   string
 	speed    string
 	elapsed  string
+	checked  string
 	estimate string
 	result     string
 	lastResult *generator.Result
@@ -874,6 +875,7 @@ func layoutResultsCard(gtx layout.Context, th *material.Theme, s *state, saveBtn
 	status := s.status
 	speed := s.speed
 	elapsed := s.elapsed
+	checked := s.checked
 	estimate := s.estimate
 	result := s.result
 	hasResult := s.lastResult != nil
@@ -881,7 +883,7 @@ func layoutResultsCard(gtx layout.Context, th *material.Theme, s *state, saveBtn
 
 	return cardWithBorder(gtx, func(gtx layout.Context) layout.Dimensions {
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-			// Stats 2-column grid
+			// Row 1: STATUS | EST. TIME
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				return layout.Flex{}.Layout(gtx,
 					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
@@ -896,7 +898,7 @@ func layoutResultsCard(gtx layout.Context, th *material.Theme, s *state, saveBtn
 				)
 			}),
 
-			// Speed/elapsed row
+			// Row 2: SPEED | ELAPSED
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				if speed == "" && elapsed == "" {
 					return layout.Dimensions{}
@@ -913,6 +915,16 @@ func layoutResultsCard(gtx layout.Context, th *material.Theme, s *state, saveBtn
 							return statBox(gtx, th, "ELAPSED", elapsed)
 						}),
 					)
+				})
+			}),
+
+			// Row 3: CHECKED (full width)
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				if checked == "" {
+					return layout.Dimensions{}
+				}
+				return layout.Inset{Top: unit.Dp(10)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+					return statBox(gtx, th, "CHECKED", checked)
 				})
 			}),
 			layout.Rigid(vspace(15)),
@@ -1150,6 +1162,7 @@ func (s *state) start(w *app.Window) {
 	s.status = "Searching..."
 	s.speed = ""
 	s.elapsed = ""
+	s.checked = ""
 	s.result = ""
 	s.lastResult = nil
 	s.mu.Unlock()
@@ -1165,30 +1178,11 @@ func (s *state) start(w *app.Window) {
 	resultCh, statsCh := gen.Start(ctx)
 
 	go func() {
-		// Use shortest prefix for running estimate
-		shortestLen := len(s.prefixes[0])
-		for _, p := range s.prefixes[1:] {
-			if len(p) < shortestLen {
-				shortestLen = len(p)
-			}
-		}
-		attempts := s.scheme.EstimateAttempts(shortestLen)
 		for stats := range statsCh {
 			s.mu.Lock()
 			s.speed = fmt.Sprintf("%s keys/sec", formatNumber(stats.KeysPerSec))
 			s.elapsed = formatDuration(stats.Elapsed)
-			if stats.KeysPerSec > 0 {
-				remaining := attempts - float64(stats.Checked)
-				if remaining < 0 {
-					remaining = 0
-				}
-				secs := remaining / stats.KeysPerSec
-				if secs < 1 {
-					s.estimate = "< 1 second"
-				} else {
-					s.estimate = "~" + formatDuration(time.Duration(secs*float64(time.Second)))
-				}
-			}
+			s.checked = formatUint(stats.Checked)
 			s.mu.Unlock()
 			w.Invalidate()
 		}
