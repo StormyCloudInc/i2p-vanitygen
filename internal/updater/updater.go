@@ -18,7 +18,7 @@ import (
 
 const (
 	owner = "StormyCloudInc"
-	repo  = "i2p-vanitygen"
+	repo  = "Vanity-Generator"
 )
 
 // Release holds parsed information from the GitHub releases API.

@@ -2,6 +2,7 @@ package generator
 
 import (
 	"context"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -29,7 +30,7 @@ type Stats struct {
 // Generator coordinates parallel vanity address searching.
 type Generator struct {
 	scheme    address.Scheme
-	prefix    string
+	prefixes  []string
 	numCores  int
 	useGPU    bool
 	gpuDevice int
@@ -38,14 +39,42 @@ type Generator struct {
 }
 
 // New creates a new vanity generator.
-func New(scheme address.Scheme, prefix string, numCores int, useGPU bool, gpuDevice int) *Generator {
+func New(scheme address.Scheme, prefixes []string, numCores int, useGPU bool, gpuDevice int) *Generator {
+	lower := make([]string, len(prefixes))
+	for i, p := range prefixes {
+		lower[i] = strings.ToLower(p)
+	}
 	return &Generator{
 		scheme:    scheme,
-		prefix:    strings.ToLower(prefix),
+		prefixes:  lower,
 		numCores:  numCores,
 		useGPU:    useGPU,
 		gpuDevice: gpuDevice,
 	}
+}
+
+// shortestPrefix returns the shortest prefix from the set (used for GPU filtering).
+func (g *Generator) shortestPrefix() string {
+	if len(g.prefixes) == 0 {
+		return ""
+	}
+	shortest := g.prefixes[0]
+	for _, p := range g.prefixes[1:] {
+		if len(p) < len(shortest) {
+			shortest = p
+		}
+	}
+	return shortest
+}
+
+// matchesAny checks if addr starts with any of the configured prefixes.
+func (g *Generator) matchesAny(addr string) bool {
+	for _, p := range g.prefixes {
+		if strings.HasPrefix(addr, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // Start begins the parallel vanity search. Returns channels for results and stats.
@@ -155,7 +184,7 @@ func (g *Generator) gpuWorker(ctx context.Context, totalChecked *atomic.Uint64, 
 	gpuW, err := gpu.NewWorker(gpu.WorkerConfig{
 		DeviceIndex:  g.gpuDevice,
 		DestTemplate: i2pCand.Raw(),
-		Prefix:       g.prefix,
+		Prefix:       g.shortestPrefix(),
 		BatchSize:    batchSize,
 	})
 	if err != nil {
@@ -184,12 +213,16 @@ func (g *Generator) gpuWorker(ctx context.Context, totalChecked *atomic.Uint64, 
 		counter += result.Checked
 
 		if result.Found {
+			// GPU matched shortest prefix; verify against all prefixes on CPU
+			i2pCand.Dest.MutateEncryptionKey(result.MatchCounter)
+			addr := i2pCand.FullAddress()
+			if !g.matchesAny(addr) {
+				continue // false positive from shorter GPU prefix
+			}
 			if found.CompareAndSwap(false, true) {
-				// Reconstruct the matching destination on CPU
-				i2pCand.Dest.MutateEncryptionKey(result.MatchCounter)
 				resultCh <- Result{
 					Candidate: i2pCand,
-					Address:   i2pCand.FullAddress(),
+					Address:   addr,
 					Attempts:  totalChecked.Load(),
 					Duration:  time.Since(startTime),
 				}
@@ -205,10 +238,10 @@ func (g *Generator) torV3GPUWorker(ctx context.Context, totalChecked *atomic.Uin
 		return
 	}
 
-	batchSize := uint64(1 << 16) // 65536 keys per GPU dispatch
+	batchSize := uint64(1 << 18) // 262144 keys per GPU dispatch
 	gpuW, err := gpu.NewTorV3Worker(gpu.TorV3WorkerConfig{
 		DeviceIndex: g.gpuDevice,
-		Prefix:      g.prefix,
+		Prefix:      g.shortestPrefix(),
 		BatchSize:   batchSize,
 	})
 	if err != nil {
@@ -216,7 +249,78 @@ func (g *Generator) torV3GPUWorker(ctx context.Context, totalChecked *atomic.Uin
 	}
 	defer gpuW.Close()
 
-	buf := make([]byte, batchSize*32)
+	// Use multiple CPU cores to precompute keys in parallel.
+	// Each core handles a chunk of the batch starting at a different offset.
+	precomputeCores := runtime.NumCPU()
+	if precomputeCores > 8 {
+		precomputeCores = 8 // diminishing returns beyond 8
+	}
+	if precomputeCores < 1 {
+		precomputeCores = 1
+	}
+	chunkSize := batchSize / uint64(precomputeCores)
+
+	// Double-buffer pipeline: CPU precomputes into one buffer while GPU
+	// processes the other, eliminating idle time on both sides.
+	bufA := make([]byte, batchSize*32)
+	bufB := make([]byte, batchSize*32)
+
+	type gpuResult struct {
+		result gpu.BatchResult
+		err    error
+	}
+	gpuDone := make(chan gpuResult, 1)
+
+	// parallelPrecompute fills buf with pubkeys using multiple goroutines.
+	// cand is advanced by batchSize keys total. Returns the snapshot from
+	// before precomputation started.
+	parallelPrecompute := func(buf []byte) *address.TorV3Candidate {
+		snapshot := cand.Clone()
+
+		if precomputeCores == 1 {
+			// Fast path: no goroutine overhead
+			for i := uint64(0); i < batchSize; i++ {
+				copy(buf[i*32:(i+1)*32], cand.PublicKeyBytes())
+				cand.Advance()
+			}
+			return snapshot
+		}
+
+		// Create per-chunk candidates at the right offsets
+		chunks := make([]*address.TorV3Candidate, precomputeCores)
+		chunks[0] = cand.Clone() // chunk 0 starts at current position
+		for c := 1; c < precomputeCores; c++ {
+			chunks[c] = cand.Clone()
+			chunks[c].AdvanceBy(uint64(c) * chunkSize)
+		}
+
+		// Parallel precompute
+		var wg sync.WaitGroup
+		for c := 0; c < precomputeCores; c++ {
+			wg.Add(1)
+			go func(chunkIdx int) {
+				defer wg.Done()
+				cc := chunks[chunkIdx]
+				start := uint64(chunkIdx) * chunkSize
+				end := start + chunkSize
+				if chunkIdx == precomputeCores-1 {
+					end = batchSize // last chunk gets any remainder
+				}
+				for i := start; i < end; i++ {
+					copy(buf[i*32:(i+1)*32], cc.PublicKeyBytes())
+					cc.Advance()
+				}
+			}(c)
+		}
+		wg.Wait()
+
+		// Advance cand past this entire batch
+		cand.AdvanceBy(batchSize)
+		return snapshot
+	}
+
+	// Precompute first batch into bufA
+	snapshotA := parallelPrecompute(bufA)
 
 	for {
 		if found.Load() {
@@ -228,36 +332,52 @@ func (g *Generator) torV3GPUWorker(ctx context.Context, totalChecked *atomic.Uin
 		default:
 		}
 
-		// Snapshot state before precomputation so we can reconstruct on match
-		snapshot := cand.Clone()
+		// Submit current batch to GPU (non-blocking via goroutine)
+		currentBuf := bufA
+		currentSnapshot := snapshotA
+		go func() {
+			r, e := gpuW.RunBatch(currentBuf, batchSize)
+			gpuDone <- gpuResult{r, e}
+		}()
 
-		// CPU precompute: advance through keys and collect pubkeys
-		for i := uint64(0); i < batchSize; i++ {
-			copy(buf[i*32:(i+1)*32], cand.PublicKeyBytes())
-			cand.Advance()
+		// While GPU works, CPU precomputes next batch into the other buffer
+		snapshotB := parallelPrecompute(bufB)
+
+		// Check for early exit while waiting for GPU
+		if found.Load() {
+			<-gpuDone
+			return
 		}
 
-		// GPU checks all keys in parallel (SHA3-256 + base32 + prefix match)
-		result, err := gpuW.RunBatch(buf, batchSize)
-		if err != nil {
-			return // GPU error, stop GPU worker
+		// Wait for GPU result
+		gr := <-gpuDone
+		if gr.err != nil {
+			return
 		}
 
-		totalChecked.Add(result.Checked)
+		totalChecked.Add(gr.result.Checked)
 
-		if result.Found {
+		if gr.result.Found {
+			// GPU matched shortest prefix; verify against all prefixes on CPU
+			currentSnapshot.AdvanceBy(gr.result.MatchCounter)
+			addr := currentSnapshot.FullAddress()
+			if !g.matchesAny(addr) {
+				continue // false positive from shorter GPU prefix
+			}
 			if found.CompareAndSwap(false, true) {
-				// Reconstruct matching candidate from snapshot
-				snapshot.AdvanceBy(result.MatchCounter)
 				resultCh <- Result{
-					Candidate: snapshot,
-					Address:   snapshot.FullAddress(),
+					Candidate: currentSnapshot,
+					Address:   addr,
 					Attempts:  totalChecked.Load(),
 					Duration:  time.Since(startTime),
 				}
 			}
 			return
 		}
+
+		// Swap buffers: next iteration submits bufB, precomputes into bufA
+		bufA, bufB = bufB, bufA
+		snapshotA = snapshotB
 	}
 }
 
@@ -282,12 +402,16 @@ func (g *Generator) i2pWorker(ctx context.Context, workerID int, totalChecked *a
 	baseCounter := uint64(workerID) << 48
 	counter := baseCounter
 	batchSize := uint64(1024)
+	localChecked := uint64(0)
 
 	for {
 		if found.Load() {
+			totalChecked.Add(localChecked)
 			return
 		}
-		if (counter-baseCounter)%batchSize == 0 {
+		if localChecked%batchSize == 0 {
+			totalChecked.Add(localChecked)
+			localChecked = 0
 			select {
 			case <-ctx.Done():
 				return
@@ -295,9 +419,8 @@ func (g *Generator) i2pWorker(ctx context.Context, workerID int, totalChecked *a
 			}
 		}
 
-		if i2pCand.MutateAndCheck(counter, g.prefix) {
-			totalChecked.Add(1)
-			counter++
+		if i2pCand.MutateAndCheckAny(counter, g.prefixes) {
+			totalChecked.Add(localChecked + 1)
 			if found.CompareAndSwap(false, true) {
 				resultCh <- Result{
 					Candidate: i2pCand,
@@ -310,7 +433,7 @@ func (g *Generator) i2pWorker(ctx context.Context, workerID int, totalChecked *a
 		}
 
 		counter++
-		totalChecked.Add(1)
+		localChecked++
 	}
 }
 
@@ -326,13 +449,16 @@ func (g *Generator) torV3Worker(ctx context.Context, workerID int, totalChecked 
 	}
 
 	batchSize := uint64(1024)
-	checked := uint64(0)
+	localChecked := uint64(0)
 
 	for {
 		if found.Load() {
+			totalChecked.Add(localChecked)
 			return
 		}
-		if checked%batchSize == 0 {
+		if localChecked%batchSize == 0 {
+			totalChecked.Add(localChecked)
+			localChecked = 0
 			select {
 			case <-ctx.Done():
 				return
@@ -340,9 +466,15 @@ func (g *Generator) torV3Worker(ctx context.Context, workerID int, totalChecked 
 			}
 		}
 
-		if cand.CheckPrefix(g.prefix) {
-			totalChecked.Add(1)
-			checked++
+		matched := false
+		for _, p := range g.prefixes {
+			if cand.CheckPrefixFast(p) {
+				matched = true
+				break
+			}
+		}
+		if matched {
+			totalChecked.Add(localChecked + 1)
 			if found.CompareAndSwap(false, true) {
 				resultCh <- Result{
 					Candidate: cand,
@@ -355,7 +487,6 @@ func (g *Generator) torV3Worker(ctx context.Context, workerID int, totalChecked 
 		}
 
 		cand.Advance()
-		checked++
-		totalChecked.Add(1)
+		localChecked++
 	}
 }

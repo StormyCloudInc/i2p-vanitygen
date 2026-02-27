@@ -1,8 +1,6 @@
 package address
 
 import (
-	"strings"
-
 	"github.com/go-i2p/i2p-vanitygen/internal/destination"
 )
 
@@ -36,7 +34,18 @@ func (c *I2PCandidate) SaveKeys(path string) error { return c.Dest.SaveKeys(path
 // MutateAndCheck mutates the encryption key with the given counter and checks the prefix.
 func (c *I2PCandidate) MutateAndCheck(counter uint64, prefix string) bool {
 	c.Dest.MutateEncryptionKey(counter)
-	return strings.HasPrefix(c.Dest.B32Address(), prefix)
+	return c.Dest.HasPrefix(prefix)
+}
+
+// MutateAndCheckAny mutates the encryption key and checks against multiple prefixes.
+func (c *I2PCandidate) MutateAndCheckAny(counter uint64, prefixes []string) bool {
+	c.Dest.MutateEncryptionKey(counter)
+	for _, p := range prefixes {
+		if c.Dest.HasPrefix(p) {
+			return true
+		}
+	}
+	return false
 }
 
 // Raw returns the raw destination bytes (needed for GPU worker template).

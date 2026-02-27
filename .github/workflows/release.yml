@@ -30,7 +30,7 @@ jobs:
           CGO_ENABLED: 1
         run: |
           LDFLAGS="-s -w -X github.com/go-i2p/i2p-vanitygen/internal/version.Version=${{ github.ref_name }}"
-          go build -ldflags "${LDFLAGS}" -o "vanitygenerator_linux_signed" .
+          go build -trimpath -ldflags "${LDFLAGS}" -o "vanitygenerator_linux_signed" .
         shell: bash
 
       - name: Upload artifact
@@ -83,7 +83,7 @@ jobs:
           set GOARCH=amd64
           set CGO_ENABLED=1
           set CC=gcc
-          go build -ldflags "-H=windowsgui -s -w -X github.com/go-i2p/i2p-vanitygen/internal/version.Version=${{ github.ref_name }}" -o "vanitygenerator_windows_signed.exe" .
+          go build -trimpath -ldflags "-H=windowsgui -s -w -X github.com/go-i2p/i2p-vanitygen/internal/version.Version=${{ github.ref_name }}" -o "vanitygenerator_windows_signed.exe" .
         shell: cmd
 
       - name: Sign Windows binary
@@ -112,7 +112,7 @@ jobs:
           CC: clang
         run: |
           LDFLAGS="-s -w -X github.com/go-i2p/i2p-vanitygen/internal/version.Version=${{ github.ref_name }}"
-          go build -ldflags "${LDFLAGS}" -o "vanitygenerator" .
+          go build -trimpath -ldflags "${LDFLAGS}" -o "vanitygenerator" .
 
       - name: Create app icon
         run: |

@@ -97,6 +97,20 @@ func (d *Destination) MutateEncryptionKey(counter uint64) {
 	binary.LittleEndian.PutUint64(d.Raw[0:8], counter)
 }
 
+// HasPrefix checks whether the base32-encoded SHA-256 hash of the destination
+// starts with the given prefix. Only encodes enough bytes to cover the prefix
+// length, avoiding the cost of encoding the full 52-character address.
+func (d *Destination) HasPrefix(prefix string) bool {
+	hash := sha256.Sum256(d.Raw[:])
+	// Each base32 character encodes 5 bits. We need ceil(prefixLen*5/8) hash bytes.
+	needed := (len(prefix)*5 + 7) / 8
+	if needed > 32 {
+		needed = 32
+	}
+	partial := b32Encoding.EncodeToString(hash[:needed])
+	return strings.HasPrefix(partial, prefix)
+}
+
 // SaveKeys writes the destination and private keys to a file.
 // Format: destination (391) + encryption private key (256) + Ed25519 private seed (32) = 679 bytes
 func (d *Destination) SaveKeys(path string) error {

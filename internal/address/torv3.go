@@ -156,6 +156,23 @@ func (c *TorV3Candidate) CheckPrefix(prefix string) bool {
 	return strings.HasPrefix(c.Address(), prefix)
 }
 
+// CheckPrefixFast checks the prefix without computing the SHA3-256 checksum.
+// For prefixes up to 51 characters, the checksum bytes (at positions 32-33
+// in the 35-byte payload) cannot affect the base32-encoded prefix, so the
+// expensive SHA3-256 can be skipped entirely.
+func (c *TorV3Candidate) CheckPrefixFast(prefix string) bool {
+	if len(prefix) <= 51 {
+		pubBytes := c.point.Bytes()
+		needed := (len(prefix)*5 + 7) / 8
+		if needed > 32 {
+			needed = 32
+		}
+		partial := strings.ToLower(onionEncoding.EncodeToString(pubBytes[:needed]))
+		return strings.HasPrefix(partial, prefix)
+	}
+	return strings.HasPrefix(c.Address(), prefix)
+}
+
 // SaveKeys writes the Tor hidden service key files to a directory.
 // Creates: hs_ed25519_secret_key, hs_ed25519_public_key, hostname
 func (c *TorV3Candidate) SaveKeys(dir string) error {

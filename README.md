@@ -22,7 +22,7 @@ Instead of accepting a randomly generated address, search for one that starts wi
 
 ## Download
 
-Grab the latest release for your platform from [Releases](https://github.com/StormyCloudInc/i2p-vanitygen/releases/latest).
+Grab the latest release for your platform from [Releases](https://github.com/StormyCloudInc/Vanity-Generator/releases/latest).
 
 | Platform | Architecture | File |
 |----------|-------------|------|
@@ -76,8 +76,8 @@ With GPU acceleration (OpenCL/Metal), I2P searches run ~100M+ keys/sec, reducing
 
 ```bash
 # Clone
-git clone https://github.com/StormyCloudInc/i2p-vanitygen.git
-cd i2p-vanitygen
+git clone https://github.com/StormyCloudInc/Vanity-Generator.git
+cd Vanity-Generator
 
 # Build (dev version)
 go build -o vanitygenerator .

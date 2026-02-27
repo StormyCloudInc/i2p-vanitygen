@@ -37,12 +37,13 @@ import (
 type state struct {
 	mu         sync.Mutex
 	running    bool
-	prefix     string
+	prefix     string   // raw input text
+	prefixes   []string // parsed individual prefixes
 	cores      int
-	status     string
-	speed      string
-	checked    string
-	estimate   string
+	status   string
+	speed    string
+	elapsed  string
+	estimate string
 	result     string
 	lastResult *generator.Result
 	cancel     context.CancelFunc
@@ -114,13 +115,18 @@ func Run(w *app.Window) error {
 		estimate:         "Awaiting input...",
 	}
 
-	// Detect GPU devices
-	if devices, err := gpu.ListDevices(); err == nil && len(devices) > 0 {
-		s.gpuAvailable = true
-		s.gpuDevices = devices
-		s.useGPU = true
-		gpuToggle.Value = true
-	}
+	// Detect GPU devices in background to avoid blocking UI startup
+	go func() {
+		if devices, err := gpu.ListDevices(); err == nil && len(devices) > 0 {
+			s.mu.Lock()
+			s.gpuAvailable = true
+			s.gpuDevices = devices
+			s.useGPU = true
+			s.mu.Unlock()
+			gpuToggle.Value = true
+			w.Invalidate()
+		}
+	}()
 
 	// Set the window icon (Windows title bar)
 	go func() {
@@ -311,6 +317,15 @@ func Run(w *app.Window) error {
 			newPrefix := strings.ToLower(prefixEditor.Text())
 			if newPrefix != s.prefix {
 				s.prefix = newPrefix
+				// Parse comma-separated prefixes
+				var parsed []string
+				for _, p := range strings.Split(newPrefix, ",") {
+					p = strings.TrimSpace(p)
+					if p != "" {
+						parsed = append(parsed, p)
+					}
+				}
+				s.prefixes = parsed
 				s.updateEstimate()
 			}
 
@@ -321,7 +336,7 @@ func Run(w *app.Window) error {
 					break
 				}
 				if e.Kind == gesture.KindClick {
-					openURL("https://github.com/go-i2p/i2p-vanitygen/releases/tag/" + version.Version)
+					openURL("https://github.com/StormyCloudInc/Vanity-Generator/releases/tag/" + version.Version)
 				}
 			}
 			for {
@@ -694,21 +709,24 @@ func layoutInputCard(gtx layout.Context, th *material.Theme, s *state, prefixEdi
 					layout.Rigid(sectionLabel(th, "TARGET PREFIX")),
 					layout.Rigid(vspace(8)),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return styledInput(gtx, th, prefixEditor, "e.g. hello", !s.running)
+						return styledInput(gtx, th, prefixEditor, "e.g. hello or hello,hello2,hello3", !s.running)
 					}),
 				)
 			}),
 			// Validation
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				if s.prefix == "" {
+				if len(s.prefixes) == 0 {
 					return layout.Dimensions{}
 				}
-				if err := s.scheme.ValidatePrefix(s.prefix); err != nil {
-					return layout.Inset{Top: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-						lbl := material.Caption(th, err.Error())
-						lbl.Color = color.NRGBA{R: 0xff, G: 0x44, B: 0x44, A: 0xff}
-						return lbl.Layout(gtx)
-					})
+				for _, p := range s.prefixes {
+					if err := s.scheme.ValidatePrefix(p); err != nil {
+						msg := fmt.Sprintf("%q: %s", p, err.Error())
+						return layout.Inset{Top: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							lbl := material.Caption(th, msg)
+							lbl.Color = color.NRGBA{R: 0xff, G: 0x44, B: 0x44, A: 0xff}
+							return lbl.Layout(gtx)
+						})
+					}
 				}
 				return layout.Dimensions{}
 			}),
@@ -855,7 +873,7 @@ func layoutResultsCard(gtx layout.Context, th *material.Theme, s *state, saveBtn
 	s.mu.Lock()
 	status := s.status
 	speed := s.speed
-	checked := s.checked
+	elapsed := s.elapsed
 	estimate := s.estimate
 	result := s.result
 	hasResult := s.lastResult != nil
@@ -878,9 +896,9 @@ func layoutResultsCard(gtx layout.Context, th *material.Theme, s *state, saveBtn
 				)
 			}),
 
-			// Speed/checked row
+			// Speed/elapsed row
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				if speed == "" && checked == "" {
+				if speed == "" && elapsed == "" {
 					return layout.Dimensions{}
 				}
 				return layout.Inset{Top: unit.Dp(10)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
@@ -892,7 +910,7 @@ func layoutResultsCard(gtx layout.Context, th *material.Theme, s *state, saveBtn
 							return layout.Spacer{Width: unit.Dp(15)}.Layout(gtx)
 						}),
 						layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-							return statBox(gtx, th, "CHECKED", checked)
+							return statBox(gtx, th, "ELAPSED", elapsed)
 						}),
 					)
 				})
@@ -1075,13 +1093,22 @@ func vspace(dp float32) func(gtx layout.Context) layout.Dimensions {
 // --- State methods ---
 
 func (s *state) updateEstimate() {
-	if s.prefix == "" || s.scheme.ValidatePrefix(s.prefix) != nil {
+	// Find shortest valid prefix for estimate
+	shortestLen := 0
+	for _, p := range s.prefixes {
+		if s.scheme.ValidatePrefix(p) == nil {
+			if shortestLen == 0 || len(p) < shortestLen {
+				shortestLen = len(p)
+			}
+		}
+	}
+	if shortestLen == 0 {
 		s.mu.Lock()
 		s.estimate = "Awaiting input..."
 		s.mu.Unlock()
 		return
 	}
-	attempts := s.scheme.EstimateAttempts(len(s.prefix))
+	attempts := s.scheme.EstimateAttempts(shortestLen)
 
 	var keysPerSec float64
 	switch s.scheme.Network() {
@@ -1108,20 +1135,26 @@ func (s *state) updateEstimate() {
 }
 
 func (s *state) start(w *app.Window) {
-	if s.prefix == "" || s.scheme.ValidatePrefix(s.prefix) != nil {
+	// Validate all prefixes
+	if len(s.prefixes) == 0 {
 		return
+	}
+	for _, p := range s.prefixes {
+		if s.scheme.ValidatePrefix(p) != nil {
+			return
+		}
 	}
 
 	s.mu.Lock()
 	s.running = true
 	s.status = "Searching..."
 	s.speed = ""
-	s.checked = ""
+	s.elapsed = ""
 	s.result = ""
 	s.lastResult = nil
 	s.mu.Unlock()
 
-	gen := generator.New(s.scheme, s.prefix, s.cores, s.useGPU, s.gpuDevice)
+	gen := generator.New(s.scheme, s.prefixes, s.cores, s.useGPU, s.gpuDevice)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	s.mu.Lock()
@@ -1132,11 +1165,18 @@ func (s *state) start(w *app.Window) {
 	resultCh, statsCh := gen.Start(ctx)
 
 	go func() {
-		attempts := s.scheme.EstimateAttempts(len(s.prefix))
+		// Use shortest prefix for running estimate
+		shortestLen := len(s.prefixes[0])
+		for _, p := range s.prefixes[1:] {
+			if len(p) < shortestLen {
+				shortestLen = len(p)
+			}
+		}
+		attempts := s.scheme.EstimateAttempts(shortestLen)
 		for stats := range statsCh {
 			s.mu.Lock()
 			s.speed = fmt.Sprintf("%s keys/sec", formatNumber(stats.KeysPerSec))
-			s.checked = fmt.Sprintf("%s", formatUint(stats.Checked))
+			s.elapsed = formatDuration(stats.Elapsed)
 			if stats.KeysPerSec > 0 {
 				remaining := attempts - float64(stats.Checked)
 				if remaining < 0 {
