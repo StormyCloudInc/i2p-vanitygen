@@ -1428,6 +1428,8 @@ func (s *state) save() {
 }
 
 func (s *state) hasUnsavedResults() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return len(s.results) > 0 && !s.saved
 }
 
