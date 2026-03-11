@@ -2,6 +2,7 @@ package updater
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -23,10 +24,11 @@ const (
 
 // Release holds parsed information from the GitHub releases API.
 type Release struct {
-	TagName   string // e.g. "v1.2.0"
-	HTMLURL   string // link to release page on GitHub
-	AssetURL  string // direct download URL for the platform asset
-	AssetSize int64  // size in bytes
+	TagName     string // e.g. "v1.2.0"
+	HTMLURL     string // link to release page on GitHub
+	AssetURL    string // direct download URL for the platform asset
+	AssetSize   int64  // size in bytes
+	AssetSHA256 string // expected SHA-256 hash of the platform asset
 }
 
 // DownloadProgress is sent on a channel during download to report progress.
@@ -79,22 +81,35 @@ func Check(ctx context.Context) (*Release, error) {
 	want := assetName()
 	var assetURL string
 	var assetSize int64
+	var checksumsURL string
 	for _, a := range gh.Assets {
 		if strings.EqualFold(a.Name, want) {
 			assetURL = a.BrowserDownloadURL
 			assetSize = a.Size
-			break
+			continue
+		}
+		if strings.EqualFold(a.Name, "checksums.txt") {
+			checksumsURL = a.BrowserDownloadURL
 		}
 	}
 	if assetURL == "" {
 		return nil, fmt.Errorf("no asset named %q in release %s", want, gh.TagName)
 	}
+	if checksumsURL == "" {
+		return nil, fmt.Errorf("no checksums.txt in release %s", gh.TagName)
+	}
+
+	assetSHA256, err := fetchAssetSHA256(ctx, checksumsURL, want)
+	if err != nil {
+		return nil, err
+	}
 
 	return &Release{
-		TagName:   gh.TagName,
-		HTMLURL:   gh.HTMLURL,
-		AssetURL:  assetURL,
-		AssetSize: assetSize,
+		TagName:     gh.TagName,
+		HTMLURL:     gh.HTMLURL,
+		AssetURL:    assetURL,
+		AssetSize:   assetSize,
+		AssetSHA256: assetSHA256,
 	}, nil
 }
 
@@ -133,6 +148,7 @@ func Download(ctx context.Context, r *Release, progress chan<- DownloadProgress)
 	total := resp.ContentLength
 	var written int64
 	buf := make([]byte, 32*1024)
+	hasher := sha256.New()
 
 	for {
 		select {
@@ -145,6 +161,11 @@ func Download(ctx context.Context, r *Release, progress chan<- DownloadProgress)
 
 		n, readErr := resp.Body.Read(buf)
 		if n > 0 {
+			if _, hErr := hasher.Write(buf[:n]); hErr != nil {
+				tmp.Close()
+				os.Remove(tmpPath)
+				return "", hErr
+			}
 			if _, wErr := tmp.Write(buf[:n]); wErr != nil {
 				tmp.Close()
 				os.Remove(tmpPath)
@@ -173,6 +194,17 @@ func Download(ctx context.Context, r *Release, progress chan<- DownloadProgress)
 		return "", err
 	}
 
+	if r.AssetSHA256 == "" {
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("missing expected checksum for update asset")
+	}
+
+	gotChecksum := fmt.Sprintf("%x", hasher.Sum(nil))
+	if !strings.EqualFold(gotChecksum, r.AssetSHA256) {
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("checksum mismatch for downloaded update")
+	}
+
 	// On Unix, ensure the downloaded binary is executable.
 	if runtime.GOOS != "windows" {
 		if err := os.Chmod(tmpPath, 0755); err != nil {
@@ -182,6 +214,46 @@ func Download(ctx context.Context, r *Release, progress chan<- DownloadProgress)
 	}
 
 	return tmpPath, nil
+}
+
+func fetchAssetSHA256(ctx context.Context, checksumsURL, assetName string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, checksumsURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "i2p-vanitygen/"+version.Version)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("checksums download: status %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", fmt.Errorf("reading checksums: %w", err)
+	}
+
+	for _, line := range strings.Split(string(body), "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) < 2 {
+			continue
+		}
+		name := strings.TrimPrefix(fields[1], "*")
+		if name == assetName {
+			checksum := strings.ToLower(fields[0])
+			if len(checksum) != sha256.Size*2 {
+				return "", fmt.Errorf("invalid checksum for asset %q", assetName)
+			}
+			return checksum, nil
+		}
+	}
+
+	return "", fmt.Errorf("missing checksum for asset %q", assetName)
 }
 
 // Apply performs self-replacement by renaming the current binary to .old
