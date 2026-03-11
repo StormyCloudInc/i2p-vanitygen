@@ -77,18 +77,30 @@ func (g *Generator) matchesAny(addr string) bool {
 	return false
 }
 
+// sendResult attempts to send a result without blocking. Returns true if sent.
+func sendResult(ctx context.Context, resultCh chan<- Result, r Result) bool {
+	select {
+	case resultCh <- r:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
 // Start begins the parallel vanity search. Returns channels for results and stats.
+// The generator runs until the context is canceled — it does NOT stop on finding
+// a match. The caller decides when to cancel (after first result, or never for
+// endless mode).
 func (g *Generator) Start(ctx context.Context) (<-chan Result, <-chan Stats) {
 	ctx, cancel := context.WithCancel(ctx)
 	g.mu.Lock()
 	g.cancel = cancel
 	g.mu.Unlock()
 
-	resultCh := make(chan Result, 1)
+	resultCh := make(chan Result, 16)
 	statsCh := make(chan Stats, 1)
 
 	var totalChecked atomic.Uint64
-	var found atomic.Bool
 	startTime := time.Now()
 
 	var workerWg sync.WaitGroup
@@ -103,9 +115,9 @@ func (g *Generator) Start(ctx context.Context) (<-chan Result, <-chan Stats) {
 			defer workerWg.Done()
 			switch g.scheme.Network() {
 			case address.NetworkI2P:
-				g.gpuWorker(ctx, &totalChecked, &found, resultCh, startTime)
+				g.gpuWorker(ctx, &totalChecked, resultCh, startTime)
 			case address.NetworkTorV3:
-				g.torV3GPUWorker(ctx, &totalChecked, &found, resultCh, startTime)
+				g.torV3GPUWorker(ctx, &totalChecked, resultCh, startTime)
 			}
 		}()
 	}
@@ -115,7 +127,7 @@ func (g *Generator) Start(ctx context.Context) (<-chan Result, <-chan Stats) {
 		workerWg.Add(1)
 		go func(workerID int) {
 			defer workerWg.Done()
-			g.worker(ctx, workerID+cpuWorkerOffset, &totalChecked, &found, resultCh)
+			g.worker(ctx, workerID+cpuWorkerOffset, &totalChecked, resultCh)
 		}(i)
 	}
 
@@ -169,7 +181,7 @@ func (g *Generator) Stop() {
 	}
 }
 
-func (g *Generator) gpuWorker(ctx context.Context, totalChecked *atomic.Uint64, found *atomic.Bool, resultCh chan<- Result, startTime time.Time) {
+func (g *Generator) gpuWorker(ctx context.Context, totalChecked *atomic.Uint64, resultCh chan<- Result, startTime time.Time) {
 	// GPU only works with I2P scheme (needs the raw destination template)
 	cand, err := g.scheme.NewCandidate()
 	if err != nil {
@@ -195,9 +207,6 @@ func (g *Generator) gpuWorker(ctx context.Context, totalChecked *atomic.Uint64, 
 	counter := uint64(0) // GPU uses workerID 0 counter space
 
 	for {
-		if found.Load() {
-			return
-		}
 		select {
 		case <-ctx.Done():
 			return
@@ -219,20 +228,23 @@ func (g *Generator) gpuWorker(ctx context.Context, totalChecked *atomic.Uint64, 
 			if !g.matchesAny(addr) {
 				continue // false positive from shorter GPU prefix
 			}
-			if found.CompareAndSwap(false, true) {
-				resultCh <- Result{
-					Candidate: i2pCand,
-					Address:   addr,
-					Attempts:  totalChecked.Load(),
-					Duration:  time.Since(startTime),
-				}
+			sendResult(ctx, resultCh, Result{
+				Candidate: i2pCand,
+				Address:   addr,
+				Attempts:  totalChecked.Load(),
+				Duration:  time.Since(startTime),
+			})
+			// Generate a fresh candidate for next matches (the current one was mutated)
+			newCand, err := g.scheme.NewCandidate()
+			if err != nil {
+				return
 			}
-			return
+			i2pCand = newCand.(*address.I2PCandidate)
 		}
 	}
 }
 
-func (g *Generator) torV3GPUWorker(ctx context.Context, totalChecked *atomic.Uint64, found *atomic.Bool, resultCh chan<- Result, startTime time.Time) {
+func (g *Generator) torV3GPUWorker(ctx context.Context, totalChecked *atomic.Uint64, resultCh chan<- Result, startTime time.Time) {
 	cand, err := address.NewTorV3Candidate()
 	if err != nil {
 		return
@@ -265,11 +277,11 @@ func (g *Generator) torV3GPUWorker(ctx context.Context, totalChecked *atomic.Uin
 	bufA := make([]byte, batchSize*32)
 	bufB := make([]byte, batchSize*32)
 
-	type gpuResult struct {
+	type gpuBatchResult struct {
 		result gpu.BatchResult
 		err    error
 	}
-	gpuDone := make(chan gpuResult, 1)
+	gpuDone := make(chan gpuBatchResult, 1)
 
 	// parallelPrecompute fills buf with pubkeys using multiple goroutines.
 	// cand is advanced by batchSize keys total. Returns the snapshot from
@@ -323,9 +335,6 @@ func (g *Generator) torV3GPUWorker(ctx context.Context, totalChecked *atomic.Uin
 	snapshotA := parallelPrecompute(bufA)
 
 	for {
-		if found.Load() {
-			return
-		}
 		select {
 		case <-ctx.Done():
 			return
@@ -337,17 +346,11 @@ func (g *Generator) torV3GPUWorker(ctx context.Context, totalChecked *atomic.Uin
 		currentSnapshot := snapshotA
 		go func() {
 			r, e := gpuW.RunBatch(currentBuf, batchSize)
-			gpuDone <- gpuResult{r, e}
+			gpuDone <- gpuBatchResult{r, e}
 		}()
 
 		// While GPU works, CPU precomputes next batch into the other buffer
 		snapshotB := parallelPrecompute(bufB)
-
-		// Check for early exit while waiting for GPU
-		if found.Load() {
-			<-gpuDone
-			return
-		}
 
 		// Wait for GPU result
 		gr := <-gpuDone
@@ -361,18 +364,14 @@ func (g *Generator) torV3GPUWorker(ctx context.Context, totalChecked *atomic.Uin
 			// GPU matched shortest prefix; verify against all prefixes on CPU
 			currentSnapshot.AdvanceBy(gr.result.MatchCounter)
 			addr := currentSnapshot.FullAddress()
-			if !g.matchesAny(addr) {
-				continue // false positive from shorter GPU prefix
-			}
-			if found.CompareAndSwap(false, true) {
-				resultCh <- Result{
+			if g.matchesAny(addr) {
+				sendResult(ctx, resultCh, Result{
 					Candidate: currentSnapshot,
 					Address:   addr,
 					Attempts:  totalChecked.Load(),
 					Duration:  time.Since(startTime),
-				}
+				})
 			}
-			return
 		}
 
 		// Swap buffers: next iteration submits bufB, precomputes into bufA
@@ -381,18 +380,18 @@ func (g *Generator) torV3GPUWorker(ctx context.Context, totalChecked *atomic.Uin
 	}
 }
 
-func (g *Generator) worker(ctx context.Context, workerID int, totalChecked *atomic.Uint64, found *atomic.Bool, resultCh chan<- Result) {
+func (g *Generator) worker(ctx context.Context, workerID int, totalChecked *atomic.Uint64, resultCh chan<- Result) {
 	startTime := time.Now()
 
 	switch g.scheme.Network() {
 	case address.NetworkI2P:
-		g.i2pWorker(ctx, workerID, totalChecked, found, resultCh, startTime)
+		g.i2pWorker(ctx, workerID, totalChecked, resultCh, startTime)
 	case address.NetworkTorV3:
-		g.torV3Worker(ctx, workerID, totalChecked, found, resultCh, startTime)
+		g.torV3Worker(ctx, workerID, totalChecked, resultCh, startTime)
 	}
 }
 
-func (g *Generator) i2pWorker(ctx context.Context, workerID int, totalChecked *atomic.Uint64, found *atomic.Bool, resultCh chan<- Result, startTime time.Time) {
+func (g *Generator) i2pWorker(ctx context.Context, workerID int, totalChecked *atomic.Uint64, resultCh chan<- Result, startTime time.Time) {
 	cand, err := g.scheme.NewCandidate()
 	if err != nil {
 		return
@@ -405,10 +404,6 @@ func (g *Generator) i2pWorker(ctx context.Context, workerID int, totalChecked *a
 	localChecked := uint64(0)
 
 	for {
-		if found.Load() {
-			totalChecked.Add(localChecked)
-			return
-		}
 		if localChecked%batchSize == 0 {
 			totalChecked.Add(localChecked)
 			localChecked = 0
@@ -421,15 +416,21 @@ func (g *Generator) i2pWorker(ctx context.Context, workerID int, totalChecked *a
 
 		if i2pCand.MutateAndCheckAny(counter, g.prefixes) {
 			totalChecked.Add(localChecked + 1)
-			if found.CompareAndSwap(false, true) {
-				resultCh <- Result{
-					Candidate: i2pCand,
-					Address:   i2pCand.FullAddress(),
-					Attempts:  totalChecked.Load(),
-					Duration:  time.Since(startTime),
-				}
+			localChecked = 0
+			sendResult(ctx, resultCh, Result{
+				Candidate: i2pCand,
+				Address:   i2pCand.FullAddress(),
+				Attempts:  totalChecked.Load(),
+				Duration:  time.Since(startTime),
+			})
+			// Generate fresh candidate for next match
+			newCand, err := g.scheme.NewCandidate()
+			if err != nil {
+				return
 			}
-			return
+			i2pCand = newCand.(*address.I2PCandidate)
+			counter = baseCounter // reset counter for new candidate
+			continue
 		}
 
 		counter++
@@ -437,7 +438,7 @@ func (g *Generator) i2pWorker(ctx context.Context, workerID int, totalChecked *a
 	}
 }
 
-func (g *Generator) torV3Worker(ctx context.Context, workerID int, totalChecked *atomic.Uint64, found *atomic.Bool, resultCh chan<- Result, startTime time.Time) {
+func (g *Generator) torV3Worker(ctx context.Context, workerID int, totalChecked *atomic.Uint64, resultCh chan<- Result, startTime time.Time) {
 	cand, err := address.NewTorV3Candidate()
 	if err != nil {
 		return
@@ -452,10 +453,6 @@ func (g *Generator) torV3Worker(ctx context.Context, workerID int, totalChecked 
 	localChecked := uint64(0)
 
 	for {
-		if found.Load() {
-			totalChecked.Add(localChecked)
-			return
-		}
 		if localChecked%batchSize == 0 {
 			totalChecked.Add(localChecked)
 			localChecked = 0
@@ -475,15 +472,15 @@ func (g *Generator) torV3Worker(ctx context.Context, workerID int, totalChecked 
 		}
 		if matched {
 			totalChecked.Add(localChecked + 1)
-			if found.CompareAndSwap(false, true) {
-				resultCh <- Result{
-					Candidate: cand,
-					Address:   cand.FullAddress(),
-					Attempts:  totalChecked.Load(),
-					Duration:  time.Since(startTime),
-				}
-			}
-			return
+			localChecked = 0
+			// Clone before sending — cand continues advancing after this
+			snapshot := cand.Clone()
+			sendResult(ctx, resultCh, Result{
+				Candidate: snapshot,
+				Address:   snapshot.FullAddress(),
+				Attempts:  totalChecked.Load(),
+				Duration:  time.Since(startTime),
+			})
 		}
 
 		cand.Advance()
