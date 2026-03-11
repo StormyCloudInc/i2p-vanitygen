@@ -1,6 +1,8 @@
 package address
 
 import (
+	"crypto/ed25519"
+
 	"github.com/go-i2p/i2p-vanitygen/internal/destination"
 )
 
@@ -46,6 +48,14 @@ func (c *I2PCandidate) MutateAndCheckAny(counter uint64, prefixes []string) bool
 		}
 	}
 	return false
+}
+
+// Clone returns a deep copy of the candidate, safe to send across goroutines.
+func (c *I2PCandidate) Clone() *I2PCandidate {
+	newDest := *c.Dest
+	newDest.SigningPrivateKey = make(ed25519.PrivateKey, len(c.Dest.SigningPrivateKey))
+	copy(newDest.SigningPrivateKey, c.Dest.SigningPrivateKey)
+	return &I2PCandidate{Dest: &newDest}
 }
 
 // Raw returns the raw destination bytes (needed for GPU worker template).

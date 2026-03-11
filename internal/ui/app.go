@@ -46,9 +46,16 @@ type state struct {
 	checked  string
 	estimate string
 	result     string
+	results    []generator.Result // all found results (endless mode)
 	lastResult *generator.Result
+	endless    bool // keep searching after first match
+	saved      bool // true after results have been saved
 	cancel     context.CancelFunc
 	gen        *generator.Generator
+
+	// Unsaved results warning
+	showSavePrompt    bool
+	savePromptAction  string // "close", "switch_i2p", "switch_tor"
 
 	// Network
 	network address.Network
@@ -84,12 +91,15 @@ func Run(w *app.Window) error {
 		saveBtn          widget.Clickable
 		coreSlider       widget.Float
 		gpuToggle        widget.Bool
+		endlessToggle    widget.Bool
 		netI2PBtn        widget.Clickable
 		netTorBtn        widget.Clickable
 		updateBannerBtn  widget.Clickable
 		updateDismissBtn widget.Clickable
 		updateInstallBtn widget.Clickable
 		updateCancelBtn  widget.Clickable
+		savePromptSave   widget.Clickable
+		savePromptDiscard widget.Clickable
 		scrollList       widget.List
 		projectLink      gesture.Click
 		donateLink       gesture.Click
@@ -162,6 +172,10 @@ func Run(w *app.Window) error {
 		switch e := w.Event().(type) {
 		case app.DestroyEvent:
 			s.stop()
+			// Auto-save unsaved results on close
+			if s.hasUnsavedResults() {
+				s.save()
+			}
 			return e.Err
 		case app.FrameEvent:
 			gtx := app.NewContext(&ops, e)
@@ -279,18 +293,35 @@ func Run(w *app.Window) error {
 			// Handle network selector
 			if !s.running {
 				if netI2PBtn.Clicked(gtx) && s.network != address.NetworkI2P {
-					s.network = address.NetworkI2P
-					s.scheme = address.I2PScheme{}
-					s.result = ""
-					s.lastResult = nil
-					s.updateEstimate()
+					if s.hasUnsavedResults() {
+						s.showSavePrompt = true
+						s.savePromptAction = "switch_i2p"
+					} else {
+						s.switchNetwork(address.NetworkI2P)
+					}
 				}
 				if netTorBtn.Clicked(gtx) && s.network != address.NetworkTorV3 {
-					s.network = address.NetworkTorV3
-					s.scheme = address.TorV3Scheme{}
-					s.result = ""
-					s.lastResult = nil
-					s.updateEstimate()
+					if s.hasUnsavedResults() {
+						s.showSavePrompt = true
+						s.savePromptAction = "switch_tor"
+					} else {
+						s.switchNetwork(address.NetworkTorV3)
+					}
+				}
+			}
+
+			// Handle save prompt buttons
+			if s.showSavePrompt {
+				if savePromptSave.Clicked(gtx) {
+					s.save()
+					s.showSavePrompt = false
+					if s.saved {
+						s.executeSavePromptAction()
+					}
+				}
+				if savePromptDiscard.Clicked(gtx) {
+					s.showSavePrompt = false
+					s.executeSavePromptAction()
 				}
 			}
 
@@ -313,6 +344,11 @@ func Run(w *app.Window) error {
 			if !s.running && s.gpuAvailable && s.scheme.SupportsGPU() && gpuToggle.Value != s.useGPU {
 				s.useGPU = gpuToggle.Value
 				s.updateEstimate()
+			}
+
+			// Sync endless toggle
+			if !s.running && endlessToggle.Value != s.endless {
+				s.endless = endlessToggle.Value
 			}
 
 			newPrefix := strings.ToLower(prefixEditor.Text())
@@ -359,14 +395,18 @@ func Run(w *app.Window) error {
 				}
 			}
 
-			layoutApp(gtx, th, s, &prefixEditor, &startBtn, &saveBtn, &coreSlider, maxCores, &gpuToggle, &netI2PBtn, &netTorBtn, &updateBannerBtn, &updateDismissBtn, &scrollList, &projectLink, &donateLink, &stormyLink)
+			layoutApp(gtx, th, s, &prefixEditor, &startBtn, &saveBtn, &coreSlider, maxCores, &gpuToggle, &endlessToggle, &netI2PBtn, &netTorBtn, &updateBannerBtn, &updateDismissBtn, &scrollList, &projectLink, &donateLink, &stormyLink)
 
 			// Draw update overlay on top
 			s.mu.Lock()
 			showUpdate := s.showUpdateOverlay
+			showSave := s.showSavePrompt
 			s.mu.Unlock()
 			if showUpdate {
 				layoutUpdateOverlay(gtx, th, s, &updateInstallBtn, &updateCancelBtn)
+			}
+			if showSave {
+				layoutSavePromptOverlay(gtx, th, &savePromptSave, &savePromptDiscard)
 			}
 
 			e.Frame(gtx.Ops)
@@ -381,7 +421,7 @@ func Run(w *app.Window) error {
 	}
 }
 
-func layoutApp(gtx layout.Context, th *material.Theme, s *state, prefixEditor *widget.Editor, startBtn, saveBtn *widget.Clickable, coreSlider *widget.Float, maxCores int, gpuToggle *widget.Bool, netI2PBtn, netTorBtn *widget.Clickable, updateBannerBtn, updateDismissBtn *widget.Clickable, scrollList *widget.List, projectLink, donateLink, stormyLink *gesture.Click) layout.Dimensions {
+func layoutApp(gtx layout.Context, th *material.Theme, s *state, prefixEditor *widget.Editor, startBtn, saveBtn *widget.Clickable, coreSlider *widget.Float, maxCores int, gpuToggle *widget.Bool, endlessToggle *widget.Bool, netI2PBtn, netTorBtn *widget.Clickable, updateBannerBtn, updateDismissBtn *widget.Clickable, scrollList *widget.List, projectLink, donateLink, stormyLink *gesture.Click) layout.Dimensions {
 	// Fill window width with side padding
 	gtx.Constraints.Min.X = gtx.Constraints.Max.X
 	return layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(4), Left: unit.Dp(20), Right: unit.Dp(20)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
@@ -410,7 +450,7 @@ func layoutApp(gtx layout.Context, th *material.Theme, s *state, prefixEditor *w
 						return layoutUpdateBanner(gtx, th, rel, updateBannerBtn, updateDismissBtn)
 					})
 				case 3: // Input card
-					return layoutInputCard(gtx, th, s, prefixEditor, startBtn, coreSlider, maxCores, gpuToggle, netI2PBtn, netTorBtn)
+					return layoutInputCard(gtx, th, s, prefixEditor, startBtn, coreSlider, maxCores, gpuToggle, endlessToggle, netI2PBtn, netTorBtn)
 				case 4: // Spacer between cards
 					return layout.Spacer{Height: unit.Dp(14)}.Layout(gtx)
 				case 5: // Results card
@@ -663,6 +703,61 @@ func layoutUpdateOverlay(gtx layout.Context, th *material.Theme, s *state, insta
 	})
 }
 
+func layoutSavePromptOverlay(gtx layout.Context, th *material.Theme, saveBtn, discardBtn *widget.Clickable) layout.Dimensions {
+	paint.Fill(gtx.Ops, colorOverlay)
+
+	return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		maxW := gtx.Dp(380)
+		if gtx.Constraints.Max.X > maxW {
+			gtx.Constraints.Max.X = maxW
+		}
+		gtx.Constraints.Min.X = gtx.Constraints.Max.X
+
+		return cardWithBorder(gtx, func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Axis: layout.Vertical, Alignment: layout.Middle}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					lbl := material.H6(th, "Unsaved Keys")
+					lbl.Color = colorText
+					lbl.Font.Weight = font.SemiBold
+					lbl.Alignment = text.Middle
+					return lbl.Layout(gtx)
+				}),
+				layout.Rigid(vspace(12)),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					lbl := material.Body2(th, "You have unsaved keys.\nWould you like to save them before continuing?")
+					lbl.Color = colorTextBody
+					lbl.Alignment = text.Middle
+					return lbl.Layout(gtx)
+				}),
+				layout.Rigid(vspace(16)),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					gtx.Constraints.Min.X = gtx.Constraints.Max.X
+					return layout.Flex{}.Layout(gtx,
+						layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+							btn := material.Button(th, discardBtn, "Discard")
+							btn.Background = color.NRGBA{R: 0x40, G: 0x40, B: 0x40, A: 0xff}
+							btn.Color = colorTextBody
+							btn.Inset = layout.Inset{Top: unit.Dp(10), Bottom: unit.Dp(10)}
+							return btn.Layout(gtx)
+						}),
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							return layout.Spacer{Width: unit.Dp(12)}.Layout(gtx)
+						}),
+						layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+							btn := material.Button(th, saveBtn, "Save Keys")
+							btn.Background = colorAccent
+							btn.Color = color.NRGBA{A: 0xff}
+							btn.Font.Weight = font.SemiBold
+							btn.Inset = layout.Inset{Top: unit.Dp(10), Bottom: unit.Dp(10)}
+							return btn.Layout(gtx)
+						}),
+					)
+				}),
+			)
+		})
+	})
+}
+
 func layoutProgressBar(gtx layout.Context, progress float64) layout.Dimensions {
 	barHeight := gtx.Dp(6)
 	width := gtx.Constraints.Max.X
@@ -687,7 +782,7 @@ func layoutProgressBar(gtx layout.Context, progress float64) layout.Dimensions {
 }
 
 
-func layoutInputCard(gtx layout.Context, th *material.Theme, s *state, prefixEditor *widget.Editor, startBtn *widget.Clickable, coreSlider *widget.Float, maxCores int, gpuToggle *widget.Bool, netI2PBtn, netTorBtn *widget.Clickable) layout.Dimensions {
+func layoutInputCard(gtx layout.Context, th *material.Theme, s *state, prefixEditor *widget.Editor, startBtn *widget.Clickable, coreSlider *widget.Float, maxCores int, gpuToggle *widget.Bool, endlessToggle *widget.Bool, netI2PBtn, netTorBtn *widget.Clickable) layout.Dimensions {
 	return cardWithBorder(gtx, func(gtx layout.Context) layout.Dimensions {
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 			// Network selector
@@ -770,6 +865,25 @@ func layoutInputCard(gtx layout.Context, th *material.Theme, s *state, prefixEdi
 									})
 								}),
 							)
+						}),
+					)
+				})
+			}),
+			// Endless mode toggle
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				return layout.Inset{Top: unit.Dp(18)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+					return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							sw := material.Switch(th, endlessToggle, "Keep Searching")
+							sw.Color.Enabled = colorAccent
+							return sw.Layout(gtx)
+						}),
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							return layout.Inset{Left: unit.Dp(12)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+								lbl := material.Caption(th, "Keep searching after finding a match")
+								lbl.Color = colorMuted
+								return lbl.Layout(gtx)
+							})
 						}),
 					)
 				})
@@ -877,8 +991,9 @@ func layoutResultsCard(gtx layout.Context, th *material.Theme, s *state, saveBtn
 	elapsed := s.elapsed
 	checked := s.checked
 	estimate := s.estimate
-	result := s.result
-	hasResult := s.lastResult != nil
+	results := make([]generator.Result, len(s.results))
+	copy(results, s.results)
+	hasResult := len(results) > 0
 	s.mu.Unlock()
 
 	return cardWithBorder(gtx, func(gtx layout.Context) layout.Dimensions {
@@ -929,18 +1044,42 @@ func layoutResultsCard(gtx layout.Context, th *material.Theme, s *state, saveBtn
 			}),
 			layout.Rigid(vspace(15)),
 
-			// Generated Address
-			layout.Rigid(sectionLabel(th, "GENERATED ADDRESS")),
+			// Generated Addresses
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				label := "GENERATED ADDRESS"
+				if len(results) > 1 {
+					label = fmt.Sprintf("GENERATED ADDRESSES (%d)", len(results))
+				}
+				return sectionLabel(th, label)(gtx)
+			}),
 			layout.Rigid(vspace(8)),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				return resultBox(gtx, th, result)
+				if len(results) == 0 {
+					return resultBox(gtx, th, "")
+				}
+				// Show all results, most recent first
+				children := make([]layout.FlexChild, 0, len(results)*2)
+				for i := len(results) - 1; i >= 0; i-- {
+					addr := results[i].Address
+					children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return resultBox(gtx, th, addr)
+					}))
+					if i > 0 {
+						children = append(children, layout.Rigid(vspace(6)))
+					}
+				}
+				return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
 			}),
 			layout.Rigid(vspace(15)),
 
 			// Save button — force full width
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				gtx.Constraints.Min.X = gtx.Constraints.Max.X
-				btn := material.Button(th, saveBtn, "Save Keys")
+				label := "Save Keys"
+				if len(results) > 1 {
+					label = fmt.Sprintf("Save All Keys (%d)", len(results))
+				}
+				btn := material.Button(th, saveBtn, label)
 				if hasResult {
 					btn.Background = colorAccent
 					btn.Color = color.NRGBA{A: 0xff}
@@ -1164,7 +1303,9 @@ func (s *state) start(w *app.Window) {
 	s.elapsed = ""
 	s.checked = ""
 	s.result = ""
+	s.results = nil
 	s.lastResult = nil
+	s.saved = false
 	s.mu.Unlock()
 
 	gen := generator.New(s.scheme, s.prefixes, s.cores, s.useGPU, s.gpuDevice)
@@ -1189,14 +1330,30 @@ func (s *state) start(w *app.Window) {
 	}()
 
 	go func() {
+		const maxResults = 100
 		for result := range resultCh {
 			s.mu.Lock()
-			s.lastResult = &result
+			s.results = append(s.results, result)
+			s.lastResult = &s.results[len(s.results)-1]
 			s.result = result.Address
-			s.status = fmt.Sprintf("Found in %s (%s attempts)", formatDuration(result.Duration), formatUint(result.Attempts))
-			s.running = false
+			s.saved = false
+			count := len(s.results)
+			endless := s.endless
+			hitLimit := endless && count >= maxResults
+			if hitLimit {
+				s.status = fmt.Sprintf("Limit reached — %d matches found", count)
+				s.running = false
+			} else {
+				s.status = fmt.Sprintf("Found %d match(es) in %s", count, formatDuration(result.Duration))
+				if !endless {
+					s.running = false
+				}
+			}
 			s.mu.Unlock()
-			s.updateEstimate()
+			if !endless || hitLimit {
+				cancel()
+				s.updateEstimate()
+			}
 			w.Invalidate()
 		}
 	}()
@@ -1205,7 +1362,12 @@ func (s *state) start(w *app.Window) {
 func (s *state) stop() {
 	s.mu.Lock()
 	s.running = false
-	s.status = "Stopped"
+	count := len(s.results)
+	if count > 0 {
+		s.status = fmt.Sprintf("Stopped — %d match(es) found", count)
+	} else {
+		s.status = "Stopped"
+	}
 	if s.cancel != nil {
 		s.cancel()
 	}
@@ -1215,17 +1377,12 @@ func (s *state) stop() {
 
 func (s *state) save() {
 	s.mu.Lock()
-	r := s.lastResult
+	results := make([]generator.Result, len(s.results))
+	copy(results, s.results)
 	network := s.network
 	s.mu.Unlock()
-	if r == nil {
+	if len(results) == 0 {
 		return
-	}
-
-	// Strip suffix to get a short name for the file/dir
-	addr := r.Candidate.Address()
-	if len(addr) > 16 {
-		addr = addr[:16]
 	}
 
 	// Save next to the executable, not the working directory
@@ -1238,33 +1395,73 @@ func (s *state) save() {
 	}
 	exeDir := filepath.Dir(exePath)
 
-	var savePath string
-	switch network {
-	case address.NetworkTorV3:
-		// Tor v3: save as a hidden service directory
-		savePath = filepath.Join(exeDir, "vanity_"+addr)
-		if err := r.Candidate.SaveKeys(savePath); err != nil {
-			s.mu.Lock()
-			s.status = "Save error: " + err.Error()
-			s.mu.Unlock()
-			return
+	saved := 0
+	var lastErr string
+	for _, r := range results {
+		addr := r.Candidate.FullAddress()
+
+		switch network {
+		case address.NetworkTorV3:
+			savePath := filepath.Join(exeDir, addr)
+			if err := r.Candidate.SaveKeys(savePath); err != nil {
+				lastErr = err.Error()
+				continue
+			}
+		default:
+			savePath := filepath.Join(exeDir, addr+".dat")
+			if err := r.Candidate.SaveKeys(savePath); err != nil {
+				lastErr = err.Error()
+				continue
+			}
 		}
-		s.mu.Lock()
-		s.status = "Keys saved to " + savePath
-		s.mu.Unlock()
-	default:
-		// I2P: save as a .dat file
-		savePath = filepath.Join(exeDir, "vanity_"+addr+".dat")
-		if err := r.Candidate.SaveKeys(savePath); err != nil {
-			s.mu.Lock()
-			s.status = "Save error: " + err.Error()
-			s.mu.Unlock()
-			return
-		}
-		s.mu.Lock()
-		s.status = "Keys saved to " + savePath
-		s.mu.Unlock()
+		saved++
 	}
+
+	s.mu.Lock()
+	if lastErr != "" && saved == 0 {
+		s.status = "Save error: " + lastErr
+	} else if lastErr != "" {
+		s.status = fmt.Sprintf("%d of %d keys saved to %s (some failed)", saved, len(results), exeDir)
+	} else if saved == 1 {
+		s.status = "Keys saved to " + exeDir
+		s.saved = true
+	} else {
+		s.status = fmt.Sprintf("%d keys saved to %s", saved, exeDir)
+		s.saved = true
+	}
+	s.mu.Unlock()
+}
+
+func (s *state) hasUnsavedResults() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.results) > 0 && !s.saved
+}
+
+func (s *state) switchNetwork(n address.Network) {
+	switch n {
+	case address.NetworkI2P:
+		s.network = address.NetworkI2P
+		s.scheme = address.I2PScheme{}
+	case address.NetworkTorV3:
+		s.network = address.NetworkTorV3
+		s.scheme = address.TorV3Scheme{}
+	}
+	s.result = ""
+	s.results = nil
+	s.lastResult = nil
+	s.saved = false
+	s.updateEstimate()
+}
+
+func (s *state) executeSavePromptAction() {
+	switch s.savePromptAction {
+	case "switch_i2p":
+		s.switchNetwork(address.NetworkI2P)
+	case "switch_tor":
+		s.switchNetwork(address.NetworkTorV3)
+	}
+	s.savePromptAction = ""
 }
 
 func formatNumber(n float64) string {
